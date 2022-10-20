@@ -1,6 +1,9 @@
 import { DynamicModule, Module, Provider } from '@nestjs/common';
 import { randomStringGenerator } from '@nestjs/common/utils/random-string-generator.util';
 import Axios from 'axios';
+import axiosBetterStacktrace from 'axios-better-stacktrace';
+import rateLimit from 'axios-rate-limit';
+import * as rax from 'retry-axios';
 import {
   AXIOS_INSTANCE_TOKEN,
   HTTP_MODULE_ID,
@@ -12,17 +15,33 @@ import {
   HttpModuleOptions,
   HttpModuleOptionsFactory,
 } from './interfaces';
-import axiosRetry from 'axios-retry';
-import axiosBetterStacktrace from 'axios-better-stacktrace';
 
 const createAxiosInstance = (config?: HttpModuleOptions) => {
   const axiosInstance = Axios.create(config);
-  axiosRetry(axiosInstance, config);
-  if(config?.isBetterStackTraceEnabled === undefined || config?.isBetterStackTraceEnabled) {
+  // axiosRetry(axiosInstance, config);
+  rateLimit(axiosInstance, {
+    maxRPS: 10,
+  });
+  axiosInstance.defaults.raxConfig = {
+    instance: axiosInstance,
+    retry: Infinity,
+    noResponseRetries: Infinity,
+    onRetryAttempt: err => {
+      const cfg = rax.getConfig(err);
+      console.log(
+        `Retry attempt #${cfg?.currentRetryAttempt} ${err.config.url}`,
+      );
+    },
+  };
+  rax.attach(axiosInstance);
+  if (
+    config?.isBetterStackTraceEnabled === undefined ||
+    config?.isBetterStackTraceEnabled
+  ) {
     axiosBetterStacktrace(axiosInstance);
   }
   return axiosInstance;
-}
+};
 
 @Module({
   providers: [
@@ -59,7 +78,8 @@ export class HttpModule {
         ...this.createAsyncProviders(options),
         {
           provide: AXIOS_INSTANCE_TOKEN,
-          useFactory: (config: HttpModuleOptions) => createAxiosInstance(config),
+          useFactory: (config: HttpModuleOptions) =>
+            createAxiosInstance(config),
           inject: [HTTP_MODULE_OPTIONS],
         },
         {
@@ -72,27 +92,25 @@ export class HttpModule {
   }
 
   private static createAsyncProviders(
-      options: HttpModuleAsyncOptions,
+    options: HttpModuleAsyncOptions,
   ): Provider[] {
     if (options.useExisting || options.useFactory) {
       return [this.createAsyncOptionsProvider(options)];
     }
 
-    const providers = [
-      this.createAsyncOptionsProvider(options)
-    ];
+    const providers = [this.createAsyncOptionsProvider(options)];
 
-    if(options.useClass)
+    if (options.useClass)
       providers.push({
         provide: options.useClass,
         useClass: options.useClass,
-      })
+      });
 
     return providers;
   }
 
   private static createAsyncOptionsProvider(
-      options: HttpModuleAsyncOptions,
+    options: HttpModuleAsyncOptions,
   ): Provider {
     if (options.useFactory) {
       return {
@@ -103,15 +121,13 @@ export class HttpModule {
     }
 
     let inject;
-    if (options.useExisting)
-      inject = [options.useExisting];
-    else if (options.useClass)
-      inject = [options.useClass];
+    if (options.useExisting) inject = [options.useExisting];
+    else if (options.useClass) inject = [options.useClass];
 
     return {
       provide: HTTP_MODULE_OPTIONS,
       useFactory: async (optionsFactory: HttpModuleOptionsFactory) =>
-          optionsFactory.createHttpOptions(),
+        optionsFactory.createHttpOptions(),
       inject,
     };
   }
